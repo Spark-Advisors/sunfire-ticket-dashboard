@@ -1,0 +1,6 @@
+"Summary","Key","Status","Client Sev Level","SunFire Sev Level","Team","Created","Updated","Last Commented","SunFire Classification"
+"SAMPLE (fictional) - drug not covered showing wrong annual cost","SFSUPPORT-00001","In Progress","Severity 3","Severity 4","Support","01/Jan/26 9:00 am","01/Jan/26 9:00 am","01/Jan/26 9:00 am",""
+"SAMPLE (fictional) - plan suppression inquiry for test ZIP 00000","SFSUPPORT-00002","Waiting for customer","Severity 3","Severity 4","Support","01/Jan/26 9:00 am","01/Jan/26 9:00 am","01/Jan/26 9:00 am",""
+"SAMPLE (fictional) - provider showing out of network incorrectly","SFSUPPORT-00003","Escalated","Severity 2","","Support","01/Jan/26 9:00 am","01/Jan/26 9:00 am","01/Jan/26 9:00 am",""
+"SAMPLE (fictional) - enroll button grayed out for test carrier","SFSUPPORT-00004","Ready to Close","Severity 4","Severity 4","Implementation","01/Jan/26 9:00 am","01/Jan/26 9:00 am","01/Jan/26 9:00 am",""
+"SAMPLE (fictional) - PY27 plans not loading in test county","SFSUPPORT-00005","Waiting for support","Severity 3","","Data Team","01/Jan/26 9:00 am","01/Jan/26 9:00 am","01/Jan/26 9:00 am",""

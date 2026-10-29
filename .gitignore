@@ -1,0 +1,3 @@
+# Never commit a real export. The real CSV is loaded in-browser (Choose CSV…).
+tickets-*.csv
+*-real.csv

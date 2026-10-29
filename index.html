@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SunFire Ticket Status — Themed Dashboard</title>
+<style>
+  :root {
+    --bg:#0f1220; --panel:#171a2b; --line:#2a2f45; --text:#e8eaf2; --muted:#9aa1bd;
+    --accent:#6366f1; --chip:#232744;
+    --sev2:#ef4444; --sev3:#f59e0b; --sev4:#64748b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  h1 { margin:0 0 4px; font-size:20px; }
+  .sub { color:var(--muted); font-size:13px; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:14px; }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 16px; font-size:14px; cursor:pointer; }
+  .btn:hover { filter:brightness(1.1); }
+  .btn.secondary { background:var(--chip); color:var(--text); border:1px solid var(--line); }
+  label.file { background:var(--chip); border:1px solid var(--line); border-radius:8px; padding:9px 16px; cursor:pointer; }
+  input[type=file]{ display:none; }
+  .toggle { display:flex; align-items:center; gap:6px; color:var(--muted); }
+  .status { color:var(--muted); font-size:12px; margin-left:auto; }
+  main { padding:24px; max-width:1200px; margin:0 auto; }
+  .empty { color:var(--muted); padding:40px; text-align:center; border:1px dashed var(--line); border-radius:12px; }
+  h2 { font-size:16px; margin:28px 0 10px; }
+  .count { color:var(--muted); font-weight:400; font-size:13px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:8px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:0; }
+  a { color:#93c5fd; text-decoration:none; } a:hover { text-decoration:underline; }
+  .sev { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; color:#fff; white-space:nowrap; }
+  .sev2{background:var(--sev2)} .sev3{background:var(--sev3)} .sev4{background:var(--sev4)} .sevx{background:#334}
+  .breakdown td:last-child, .breakdown th:last-child { text-align:right; width:90px; }
+  .pill { background:var(--chip); border:1px solid var(--line); border-radius:999px; padding:1px 8px; font-size:12px; color:var(--muted); }
+  .warn { background:#3a2410; border:1px solid #7a4a12; color:#f3c08a; border-radius:8px; padding:8px 12px; font-size:12px; margin-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SunFire Ticket Status — Themed Dashboard</h1>
+  <div class="sub">Loads a SunFire support export (CSV) and groups tickets into themes. Data is read in your browser only — nothing is uploaded or stored.</div>
+  <div class="controls">
+    <label class="file">Choose CSV…<input id="file" type="file" accept=".csv,text/csv" /></label>
+    <button id="refresh" class="btn">Refresh</button>
+    <button id="loadRepo" class="btn secondary" title="Re-fetch tickets.csv committed next to this page">Load tickets.csv</button>
+    <span class="toggle"><input id="redact" type="checkbox" checked /> <label for="redact">Redact PII</label></span>
+    <span id="status" class="status">No file loaded.</span>
+  </div>
+  <div id="warn" class="warn" style="display:none"></div>
+</header>
+<main>
+  <div id="out"><div class="empty">Choose today's CSV (or click <b>Load tickets.csv</b>) to see the current status.</div></div>
+</main>
+<script>
+"use strict";
+var JIRA_BASE = "https://sunfire.atlassian.net/servicedesk/customer/portal/6/";
+
+// ---- theme classifier: ordered, first match wins ----
+var THEMES = [
+  ["Plan suppression", /suppress/],
+  ["HRA forms & data", /\bhras?\b/],
+  ["Data sync & integrations", /blaze|ignite|code connect|flowing to|not updating/],
+  ["Reporting (performance & RTS reports)", /performance report|rts report|reporting/],
+  ["Provider & network data", /provider|in[\s-]?network|out[\s-]?of[\s-]?network|\bdoctor|priority data/],
+  ["Enrollment verification, duplicates & audit trail", /duplicate|\bpurl\b|footprint|webhook|verify with carrier|confirm if this enrollment|oth code|made on \d/],
+  ["Enrollment tooling & eligibility errors", /enroll link|enroll button|grayed out|ineligible|\btpv\b|edit button/],
+  ["Drug cost, formulary & coverage", /\bdrug|formulary|medication|dosage|\btier\b|not covered|drugs covered|alendron|annual .*cost|\$\s?\d/],
+  ["RTS, appointments & carrier setup", /\brts\b|ready to sell|appointed|rollback|add fl blue|removed from .*rts|\bcarrier\b/],
+  ["Plan availability / plans not loading (incl. PY27)", /not loading|missing in|no csnp|not showing|not populating|missing|crosswalk/],
+  ["SunFire account, login & access", /\blogin\b|account is linked|apollo|linked to another|create .*login|\baccess\b/],
+  ["Plan details & documents", /spanish|evidence of coverage|deductible|\beoc\b|document/]
+];
+var THEME_ORDER = THEMES.map(function(t){return t[0];}).concat(["Other / uncategorized"]);
+function classify(summary){
+  var s=(summary||"").toLowerCase();
+  for (var i=0;i<THEMES.length;i++){ if(THEMES[i][1].test(s)) return THEMES[i][0]; }
+  return "Other / uncategorized";
+}
+
+// ---- redactor: scrub detectable PII ----
+function redact(s){
+  if(!s) return s;
+  s = s.replace(/(\bnpn[:\s#]*)(\d{5,})/ig, "$1[redacted]");
+  s = s.replace(/\bagent\s+(\d{6,})\b/ig, "agent [redacted]");
+  s = s.replace(/(personal code[:\s]*)([A-Za-z0-9]{5,})/ig, "$1[redacted]");
+  s = s.replace(/(enrollment codes?[:\s]*)([A-Z0-9]{6,}(?:\s*(?:,|and)\s*[A-Z0-9]{6,})*)/ig, "$1[redacted]");
+  s = s.replace(/\b[A-Z0-9]{8,12}\b/g, function(t){
+    return (/[A-Z]/.test(t) && /\d/.test(t)) ? "[redacted]" : t;
+  });
+  s = s.replace(/(login for\s+)([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)/ig, "$1[redacted]");
+  s = s.replace(/(Provider In Network:\s*)([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)/g, "$1[redacted]");
+  s = s.replace(/^([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)(\s+reached out)/, "[redacted]$2");
+  return s;
+}
+
+// ---- minimal RFC-4180-ish CSV parser (handles quotes, doubled quotes, commas, newlines) ----
+function parseCSV(text){
+  var rows=[], row=[], field="", i=0, inq=false, c;
+  text = text.replace(/^﻿/, "").replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  while(i<text.length){
+    c=text[i];
+    if(inq){
+      if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i+=2; continue; } inq=false; i++; continue; }
+      field+=c; i++; continue;
+    }
+    if(c==='"'){ inq=true; i++; continue; }
+    if(c===','){ row.push(field); field=""; i++; continue; }
+    if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=""; i++; continue; }
+    field+=c; i++;
+  }
+  if(field.length||row.length){ row.push(field); rows.push(row); }
+  return rows.filter(function(r){ return r.length>1 || (r.length===1 && r[0].trim()!==""); });
+}
+
+function toObjects(rows){
+  if(!rows.length) return [];
+  var headers = rows[0].map(function(h){return h.trim();});
+  function idx(names){
+    for(var n=0;n<names.length;n++){
+      for(var h=0;h<headers.length;h++){ if(headers[h].toLowerCase()===names[n]) return h; }
+    }
+    return -1;
+  }
+  var map = {
+    summary: idx(["summary"]),
+    key: idx(["key","jira","ticket","id"]),
+    status: idx(["status"]),
+    csev: idx(["client sev level","client severity","client sev"]),
+    ssev: idx(["sunfire sev level","sunfire severity","sunfire sev"]),
+    team: idx(["team"]),
+    created: idx(["created","date created","created date"])
+  };
+  var out=[];
+  for(var r=1;r<rows.length;r++){
+    var row=rows[r];
+    function g(k){ return map[k]>=0 ? (row[map[k]]||"").trim() : ""; }
+    if(!g("summary") && !g("key")) continue;
+    out.push({ summary:g("summary"), key:g("key"), status:g("status"),
+               csev:g("csev"), ssev:g("ssev"), team:g("team"), created:g("created") });
+  }
+  return { rows:out, map:map };
+}
+
+function sevClass(s){
+  if(/2/.test(s)) return "sev2"; if(/3/.test(s)) return "sev3"; if(/4/.test(s)) return "sev4"; return "sevx";
+}
+function esc(s){ return (s||"").replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+function createdDate(s){ return (s||"").split(" ")[0]; }
+
+var lastFile=null;
+
+function render(parsed, doRedact){
+  var rows=parsed.rows, map=parsed.map;
+  var out=document.getElementById("out");
+  if(!rows.length){ out.innerHTML='<div class="empty">No ticket rows found in that CSV.</div>'; return; }
+
+  // warn if expected columns missing
+  var missing=[];
+  if(map.summary<0) missing.push("Summary");
+  if(map.key<0) missing.push("Key");
+  var warn=document.getElementById("warn");
+  if(missing.length){ warn.style.display="block"; warn.textContent="Heads up: couldn't find column(s): "+missing.join(", ")+". Check the CSV headers."; }
+  else { warn.style.display="none"; }
+
+  var buckets={}; THEME_ORDER.forEach(function(t){buckets[t]=[];});
+  rows.forEach(function(r){ buckets[classify(r.summary)].push(r); });
+
+  var html="";
+  html+='<h2>Theme breakdown</h2><table class="breakdown"><tr><th>Theme</th><th>Tickets</th></tr>';
+  THEME_ORDER.forEach(function(t){ if(buckets[t].length) html+="<tr><td>"+esc(t)+"</td><td>"+buckets[t].length+"</td></tr>"; });
+  html+="<tr><td><b>Total</b></td><td><b>"+rows.length+"</b></td></tr></table>";
+
+  THEME_ORDER.forEach(function(t){
+    var b=buckets[t]; if(!b.length) return;
+    b.sort(function(a,c){ return (a.key||"").localeCompare(c.key||""); });
+    html+='<h2>'+esc(t)+' <span class="count">('+b.length+')</span></h2>';
+    html+='<table><tr><th>JIRA</th><th>Summary</th><th>Status</th><th>Client Sev</th><th>SunFire Sev</th><th>Team</th><th>Created</th></tr>';
+    b.forEach(function(r){
+      var summary = doRedact ? redact(r.summary) : r.summary;
+      var keyCell = r.key ? ('<a href="'+JIRA_BASE+encodeURIComponent(r.key)+'" target="_blank" rel="noopener">'+esc(r.key)+'</a>') : "—";
+      html+="<tr><td>"+keyCell+"</td><td>"+esc(summary)+"</td><td>"+esc(r.status||"—")+"</td>"+
+            '<td><span class="sev '+sevClass(r.csev)+'">'+esc(r.csev||"—")+'</span></td>'+
+            '<td><span class="sev '+sevClass(r.ssev)+'">'+esc(r.ssev||"—")+'</span></td>'+
+            "<td>"+esc(r.team||"—")+"</td><td>"+esc(createdDate(r.created))+"</td></tr>";
+    });
+    html+="</table>";
+  });
+  out.innerHTML=html;
+}
+
+function setStatus(msg){ document.getElementById("status").textContent=msg; }
+
+function handleText(text, source){
+  var parsed=toObjects(parseCSV(text));
+  render(parsed, document.getElementById("redact").checked);
+  var when=new Date().toLocaleString();
+  setStatus((parsed.rows?parsed.rows.length:0)+" tickets · "+source+" · loaded "+when);
+}
+
+function readFile(file){
+  var reader=new FileReader();
+  reader.onload=function(){ handleText(reader.result, file.name); };
+  reader.readAsText(file);
+}
+
+document.getElementById("file").addEventListener("change", function(e){
+  var f=e.target.files[0]; if(!f) return; lastFile=f; readFile(f);
+});
+document.getElementById("refresh").addEventListener("click", function(){
+  if(lastFile){ readFile(lastFile); } else { loadRepoCsv(); }
+});
+document.getElementById("redact").addEventListener("change", function(){
+  if(lastFile){ readFile(lastFile); } else { loadRepoCsv(); }
+});
+document.getElementById("loadRepo").addEventListener("click", loadRepoCsv);
+
+function loadRepoCsv(){
+  setStatus("Loading tickets.csv…");
+  fetch("tickets.csv?_="+Date.now()).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return r.text();
+  }).then(function(t){ lastFile=null; handleText(t, "tickets.csv"); })
+    .catch(function(err){ setStatus("No tickets.csv found next to this page ("+err.message+"). Use “Choose CSV…” instead."); });
+}
+
+// try to auto-load a committed tickets.csv on first open (sample is synthetic)
+loadRepoCsv();
+</script>
+</body>
+</html>
