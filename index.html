@@ -38,20 +38,23 @@
   .breakdown td:last-child, .breakdown th:last-child { text-align:right; width:90px; }
   .pill { background:var(--chip); border:1px solid var(--line); border-radius:999px; padding:1px 8px; font-size:12px; color:var(--muted); }
   .warn { background:#3a2410; border:1px solid #7a4a12; color:#f3c08a; border-radius:8px; padding:8px 12px; font-size:12px; margin-top:12px; }
+  .note { background:#10233a; border:1px solid #1f4f7a; color:#9ecbf0; border-radius:8px; padding:8px 12px; font-size:12px; margin-top:12px; }
 </style>
 </head>
 <body>
 <header>
   <h1>SunFire Ticket Status — Themed Dashboard</h1>
-  <div class="sub">Loads a SunFire support export (CSV) and groups tickets into themes. Data is read in your browser only — nothing is uploaded or stored.</div>
+  <div class="sub">Groups SunFire support tickets into themes. The published view (tickets.csv) is <b>de-identified</b> — no member names, ZIPs, dates, or IDs. Uploaded files are read in your browser only — never uploaded or stored.</div>
   <div class="controls">
     <label class="file">Choose CSV…<input id="file" type="file" accept=".csv,text/csv" /></label>
     <button id="refresh" class="btn">Refresh</button>
     <button id="loadRepo" class="btn secondary" title="Re-fetch tickets.csv committed next to this page">Load tickets.csv</button>
+    <button id="deid" class="btn secondary" title="Scrub the loaded file and download a de-identified tickets.csv safe to publish">Download de-identified CSV</button>
     <span class="toggle"><input id="redact" type="checkbox" checked /> <label for="redact">Redact PII</label></span>
     <span id="status" class="status">No file loaded.</span>
   </div>
   <div id="warn" class="warn" style="display:none"></div>
+  <div id="note" class="note" style="display:none"></div>
 </header>
 <main>
   <div id="out"><div class="empty">Choose today's CSV (or click <b>Load tickets.csv</b>) to see the current status.</div></div>
@@ -82,7 +85,7 @@ function classify(summary){
   return "Other / uncategorized";
 }
 
-// ---- redactor: scrub detectable PII ----
+// ---- redactor: scrub detectable PII for on-screen display ----
 function redact(s){
   if(!s) return s;
   s = s.replace(/(\bnpn[:\s#]*)(\d{5,})/ig, "$1[redacted]");
@@ -95,6 +98,30 @@ function redact(s){
   s = s.replace(/(login for\s+)([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)/ig, "$1[redacted]");
   s = s.replace(/(Provider In Network:\s*)([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)/g, "$1[redacted]");
   s = s.replace(/^([A-Z][a-z]+\s+[A-Z][a-zA-Z]+)(\s+reached out)/, "[redacted]$2");
+  return s;
+}
+
+// ---- de-identifier: aggressive scrub of HIPAA-style identifiers, used when
+// producing the published tickets.csv. Runs redact() first, then strips
+// structured identifiers (ZIP, phone, email, SSN, MBI, dates, street address).
+// NOTE: free-text names can still slip past heuristics — always eyeball the
+// downloaded file (and get Privacy Officer sign-off) before publishing it. ----
+function deidentify(s){
+  if(!s) return s;
+  s = redact(s);
+  s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[email]");
+  s = s.replace(/\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, "[phone]");
+  s = s.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[ssn]");
+  // Medicare Beneficiary Identifier: 11 alnum chars containing both letters and digits
+  s = s.replace(/\b(?=[A-Z0-9]{11}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{11}\b/ig, "[mbi]");
+  // explicit "zip code NNNNN" and bare 5-digit (or ZIP+4) codes
+  s = s.replace(/\bzip(?:\s*code)?[:\s]*\d{5}(?:-\d{4})?\b/ig, "zip [redacted]");
+  s = s.replace(/\b\d{5}(?:-\d{4})?\b/g, "[zip]");
+  // dates -> drop (keep nothing more precise than year elsewhere)
+  s = s.replace(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/g, "[date]");
+  s = s.replace(/\b\d{1,2}\/\d{1,2}\b/g, "[date]");
+  // street address: number + words + common suffix
+  s = s.replace(/\b\d{1,6}\s+[A-Za-z0-9.\s]{2,40}?\b(?:st|street|ave|avenue|rd|road|dr|drive|blvd|ln|lane|ct|court|way|pl|place|hwy|cir|circle)\b\.?/ig, "[address]");
   return s;
 }
 
@@ -153,6 +180,7 @@ function esc(s){ return (s||"").replace(/[&<>"]/g,function(c){return {"&":"&amp;
 function createdDate(s){ return (s||"").split(" ")[0]; }
 
 var lastFile=null;
+var lastParsed=null;
 
 function render(parsed, doRedact){
   var rows=parsed.rows, map=parsed.map;
@@ -197,6 +225,7 @@ function setStatus(msg){ document.getElementById("status").textContent=msg; }
 
 function handleText(text, source){
   var parsed=toObjects(parseCSV(text));
+  lastParsed=parsed;
   render(parsed, document.getElementById("redact").checked);
   var when=new Date().toLocaleString();
   setStatus((parsed.rows?parsed.rows.length:0)+" tickets · "+source+" · loaded "+when);
@@ -206,6 +235,29 @@ function readFile(file){
   var reader=new FileReader();
   reader.onload=function(){ handleText(reader.result, file.name); };
   reader.readAsText(file);
+}
+
+// ---- de-identified CSV export (runs entirely in the browser) ----
+function csvCell(v){ v=(v==null?"":String(v)); return '"'+v.replace(/"/g,'""')+'"'; }
+function downloadDeid(){
+  if(!lastParsed || !lastParsed.rows || !lastParsed.rows.length){
+    setStatus("Load a CSV first, then download the de-identified version.");
+    return;
+  }
+  var header=["Summary","Key","Status","Client Sev Level","SunFire Sev Level","Team","Created"];
+  var lines=[header.map(csvCell).join(",")];
+  lastParsed.rows.forEach(function(r){
+    lines.push([ deidentify(r.summary), r.key, r.status, r.csev, r.ssev, r.team, createdDate(r.created) ].map(csvCell).join(","));
+  });
+  var blob=new Blob([lines.join("\n")+"\n"], {type:"text/csv"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a"); a.href=url; a.download="tickets.csv"; a.click();
+  URL.revokeObjectURL(url);
+  var note=document.getElementById("note");
+  note.style.display="block";
+  note.innerHTML="Downloaded <b>tickets.csv</b> ("+lastParsed.rows.length+" rows, summaries de-identified). "+
+                 "<b>Review it</b> (and get Privacy Officer sign-off) before committing it to the public repo — "+
+                 "automated scrubbing can miss free-text names.";
 }
 
 document.getElementById("file").addEventListener("change", function(e){
@@ -218,6 +270,7 @@ document.getElementById("redact").addEventListener("change", function(){
   if(lastFile){ readFile(lastFile); } else { loadRepoCsv(); }
 });
 document.getElementById("loadRepo").addEventListener("click", loadRepoCsv);
+document.getElementById("deid").addEventListener("click", downloadDeid);
 
 function loadRepoCsv(){
   setStatus("Loading tickets.csv…");
@@ -228,7 +281,7 @@ function loadRepoCsv(){
     .catch(function(err){ setStatus("No tickets.csv found next to this page ("+err.message+"). Use “Choose CSV…” instead."); });
 }
 
-// try to auto-load a committed tickets.csv on first open (sample is synthetic)
+// try to auto-load a committed tickets.csv on first open
 loadRepoCsv();
 </script>
 </body>
